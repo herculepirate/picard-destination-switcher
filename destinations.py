@@ -213,3 +213,30 @@ def tagmender_colour_for(d: dict, profiles, by_profile: dict) -> str | None:
     word = str(d.get('name') or '').lower()
     there.sort(key=lambda p: (word not in p['name'].lower(), p['name'].lower()))
     return by_profile.get(there[0]['name'], '')
+
+
+# ---- each album its own folder and naming script --------------------------------------------------
+# An album's own choice is {"path", "script"} ("script" "": Picard's active one); none: Picard's.
+def effective(own, default) -> dict:
+    """Where an album saves and with which script: its own choice, else Picard's (DEFAULT:
+    {"path": move_files_to, "script": active_file_naming_script_id})."""
+    own, default = own or {}, default or {}
+    return {'path': str(own.get('path') or default.get('path') or ''),
+            'script': str(own.get('script') or default.get('script') or '')}
+
+
+def chosen(own, default, path: str, linked: str = '') -> dict:
+    """An album's own choice once you pick folder PATH for it: with the naming script linked to
+    that folder (LINKED), else the script it had."""
+    return {'path': str(path), 'script': str(linked or effective(own, default)['script'])}
+
+
+def scope_label(titles) -> str:
+    """The bar's "Save to" label: for every album, or the albums you selected."""
+    titles = list(titles or ())
+    if not titles:
+        return 'Every album saves to:'
+    if len(titles) == 1:
+        t = str(titles[0] or 'This album')
+        return f'{t[:37] + "…" if len(t) > 38 else t} saves to:'
+    return f'{len(titles)} selected albums save to:'

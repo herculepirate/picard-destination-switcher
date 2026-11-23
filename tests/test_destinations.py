@@ -93,5 +93,25 @@ class SharedFolder(unittest.TestCase):
         self.assertEqual(dst.index_of(items, '/m/x', 'va'), -1)
 
 
+class EachAlbum(unittest.TestCase):
+    DEFAULT = {'path': '/m/ll', 'script': 'all'}
+
+    def test_effective(self):
+        self.assertEqual(dst.effective(None, self.DEFAULT), self.DEFAULT)
+        self.assertEqual(dst.effective({'path': '/m/x', 'script': ''}, self.DEFAULT), {'path': '/m/x', 'script': 'all'})
+
+    def test_chosen(self):
+        own = dst.chosen(None, self.DEFAULT, '/m/cl', 'classical')
+        self.assertEqual(own, {'path': '/m/cl', 'script': 'classical'})
+        # a folder with no script of its own: the album keeps the one it had
+        self.assertEqual(dst.chosen(own, self.DEFAULT, '/m/new'), {'path': '/m/new', 'script': 'classical'})
+        self.assertEqual(dst.chosen(None, self.DEFAULT, '/m/new'), {'path': '/m/new', 'script': 'all'})
+
+    def test_scope_label(self):
+        self.assertEqual(dst.scope_label([]), 'Every album saves to:')
+        self.assertEqual(dst.scope_label(['Solaris']), 'Solaris saves to:')
+        self.assertEqual(dst.scope_label(['A', 'B']), '2 selected albums save to:')
+
+
 if __name__ == '__main__':
     unittest.main()

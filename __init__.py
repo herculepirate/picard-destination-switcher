@@ -1,5 +1,6 @@
 """Destination Switcher: where Picard saves, and with which file naming script, from a bar above
-one of Picard's panes (or a toolbar), coloured as TagMender colours its profiles.
+one of Picard's panes (or a toolbar), coloured as TagMender colours its profiles - for the albums
+selected in the right pane alone, or (none selected) for every album.
 
 The bar shows and changes Picard's own settings - its destination directory (move_files_to),
 Move files (move_files), Rename files (rename_files) and the active file naming script
@@ -19,7 +20,7 @@ from functools import partial
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from picard.plugin3.api import OptionsPage
+from picard.plugin3.api import BaseAction, OptionsPage
 
 try:
     from . import destinations as dst
@@ -34,6 +35,7 @@ DEFAULTS = {
     'move_on_choose': True,        # choosing a folder turns Move files on
     'show_switches': True,         # Move files / Rename files on the bar
     'show_scripts': True,          # the naming script dropdown
+    'tint_albums': True,           # each album in the right pane tinted with its folder's colour
 }
 PLACEMENTS = (('right', 'Above the right pane (where files go)'),
               ('left', 'Above the left pane (the files)'),
@@ -47,6 +49,12 @@ TOOLBAR_NAME = 'destination_switcher_toolbar'
 _API = None
 _BAR: 'SwitcherBar | None' = None
 _HOST = None                    # the toolbar holding the bar, when placed on one
+# each album's own folder and naming script: {album id: {"path", "script"}} (none: Picard's)
+_ALBUMS: dict = {}
+_ORIG_MAKE_FILENAME = None      # Picard's File.make_filename, while ours stands in for it
+_HOOKS: list = []               # (signal, slot) connected while the bar is shown
+_RETINT_DUE = False
+MIXED, SAME = '\x00mixed', '\x00same'
 
 
 def _setting():
@@ -93,6 +101,230 @@ def _items_and_colours():
     items = dst.load(_own('destinations'))
     profiles = dst.tagmender_profiles() if _own('tagmender_colours') else None
     return items, dst.colours(items, profiles)
+
+
+# ---- each album its own folder ---------------------------------------------------------------
+def _default() -> dict:
+    """Picard's own folder and naming script: where an album with none of its own saves."""
+    s = _setting()
+    return {'path': str(s['move_files_to'] or ''), 'script': str(s['active_file_naming_script_id'] or '')}
+
+
+def _album_view(window):
+    views = getattr(getattr(window, 'panel', None), '_views', None)
+    return views[1] if views and len(views) > 1 else None
+
+
+def _album_of(obj):
+    """The album an album, track or file in it belongs to (None: a cluster, an unmatched file)."""
+    try:
+        from picard.album import Album
+    except ImportError:
+        return None
+    if isinstance(obj, Album):
+        return obj
+    for o in (obj, getattr(obj, 'parent_item', None)):        # a track; a file in a track
+        album = getattr(o, 'album', None)
+        if isinstance(album, Album):
+            return album
+    return None
+
+
+def _key(album) -> str:
+    return str(getattr(album, 'id', '') or id(album))
+
+
+def _title(album) -> str:
+    try:
+        return str(album.metadata['album'] or '') or _key(album)
+    except Exception:
+        return _key(album)
+
+
+def _selected_albums(window) -> list:
+    """The albums selected in the right pane (a track selected: its album)."""
+    view = _album_view(window)
+    out = []
+    for item in (view.selectedItems() if view is not None else ()):
+        album = _album_of(getattr(item, 'obj', None))
+        if album is not None and all(album is not a for a in out):
+            out.append(album)
+    return out
+
+
+def _assign(albums, path: str, at: int = -1) -> None:
+    """ALBUMS save to folder PATH (your folder AT: with the naming script linked to it)."""
+    items = dst.load(_own('destinations'))
+    sid = dst.linked_script(items[at], _setting()['file_renaming_scripts']) if 0 <= at < len(items) else ''
+    default = _default()
+    for album in albums:
+        k = _key(album)
+        _ALBUMS[k] = dst.chosen(_ALBUMS.get(k), default, path, sid)
+    if _own('move_on_choose') and not _setting()['move_files']:
+        _setting()['move_files'] = True
+    log = _log()
+    if log:
+        log.info('Destination Switcher: %s saves to %s%s', ', '.join(_title(a) for a in albums), path,
+                 f' with naming script {sid}' if sid else '')
+    _changed()
+
+
+def _changed() -> None:
+    _retint()
+    if _BAR is not None:
+        _BAR.rebuild()
+
+
+def _retint() -> None:
+    """Each album in the right pane tinted with the colour of the folder it saves to; albums no
+    longer there forget their folder."""
+    global _RETINT_DUE
+    _RETINT_DUE = False
+    view = _album_view(getattr(getattr(_API, 'tagger', None), 'window', None)) if _API else None
+    if view is None:
+        return
+    items, colours = _items_and_colours()
+    on, dark, default, present = bool(_own('tint_albums')), _dark(view), _default(), set()
+    for i in range(view.topLevelItemCount()):
+        item = view.topLevelItem(i)
+        album = _album_of(getattr(item, 'obj', None))
+        if album is None:
+            continue
+        k = _key(album)
+        present.add(k)
+        there = dst.effective(_ALBUMS.get(k), default)
+        at = dst.index_of(items, there['path'], there['script'])
+        wash = dst.tint(colours[at], dark) if on and at >= 0 else ''
+        brush = QtGui.QBrush(QtGui.QColor(wash)) if wash else QtGui.QBrush()
+        for c in range(view.columnCount()):
+            if item.background(c) != brush:
+                item.setBackground(c, brush)
+    for k in [k for k in _ALBUMS if k not in present]:
+        _ALBUMS.pop(k, None)
+
+
+def _retint_later(*_args) -> None:
+    global _RETINT_DUE
+    if not _RETINT_DUE:
+        _RETINT_DUE = True
+        QtCore.QTimer.singleShot(0, _retint)
+
+
+class _Overlay:
+    """Picard's settings with an album's own folder and naming script in place of Picard's."""
+
+    def __init__(self, base, over):
+        self._base, self._over = base, over
+
+    def __getitem__(self, key):
+        return self._over[key] if key in self._over else self._base[key]
+
+    def __contains__(self, key):
+        return key in self._over or key in self._base
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+
+def _patch_saving() -> None:
+    """When Picard names a file of an album with a folder of its own, it is given that folder
+    and naming script (Picard's own settings unchanged)."""
+    global _ORIG_MAKE_FILENAME
+    if _ORIG_MAKE_FILENAME is not None:
+        return
+    try:
+        from picard.config import get_config
+        from picard.file import File
+    except ImportError:
+        return
+    original = File.make_filename
+
+    def make_filename(self, filename, metadata, settings=None, naming_format=None):
+        try:
+            album = _album_of(self) if _ALBUMS else None
+            own = _ALBUMS.get(_key(album)) if album is not None else None
+            base = get_config().setting
+            if own and naming_format is None and (settings is None or settings is base):
+                there = dst.effective(own, {'path': base['move_files_to'],
+                                            'script': base['active_file_naming_script_id']})
+                settings = _Overlay(base, {'move_files_to': there['path'],
+                                           'active_file_naming_script_id': there['script']})
+        except Exception:
+            log = _log()
+            if log:
+                log.error('Destination Switcher: an album\'s own folder could not be used', exc_info=True)
+        return original(self, filename, metadata, settings, naming_format)
+
+    File.make_filename = make_filename
+    _ORIG_MAKE_FILENAME = original
+
+
+def _unpatch_saving() -> None:
+    global _ORIG_MAKE_FILENAME
+    if _ORIG_MAKE_FILENAME is None:
+        return
+    try:
+        from picard.file import File
+        File.make_filename = _ORIG_MAKE_FILENAME
+    except ImportError:
+        pass
+    _ORIG_MAKE_FILENAME = None
+
+
+def _folder_menu(parent, albums) -> QtWidgets.QMenu:
+    """Your folders, to choose one for ALBUMS (a right-click on albums)."""
+    menu = QtWidgets.QMenu(parent)
+    items, colours = _items_and_colours()
+    default = _default()
+    shown = {(dst.effective(_ALBUMS.get(_key(a)), default)['path'],
+              dst.effective(_ALBUMS.get(_key(a)), default)['script']) for a in albums}
+    for i, (d, colour) in enumerate(zip(items, colours)):
+        act = menu.addAction(_dot_icon(colour), dst.label(d))
+        act.setCheckable(True)
+        act.setChecked(len(shown) == 1 and dst.index_of(items, *next(iter(shown))) == i)
+        act.triggered.connect(partial(_assign, albums, d['path'], i))
+    if any(_key(a) in _ALBUMS for a in albums):
+        menu.addSeparator()
+        menu.addAction('Same as every album').triggered.connect(partial(_forget, albums))
+    if not items:
+        menu.addAction('Name your folders…').triggered.connect(
+            partial(_open_options, getattr(_API.tagger, 'window', None)))
+    return menu
+
+
+class SaveToAction(BaseAction):
+    """Right-click on albums: Save to folder… - one of your folders for them alone."""
+    TITLE = 'Save to folder…'
+
+    def callback(self, objs):
+        albums = []
+        for obj in objs or ():
+            album = _album_of(obj)
+            if album is not None and all(album is not a for a in albums):
+                albums.append(album)
+        if albums:
+            _folder_menu(getattr(self.tagger, 'window', None), albums).exec(QtGui.QCursor.pos())
+
+
+def _untint() -> None:
+    view = _album_view(getattr(getattr(_API, 'tagger', None), 'window', None)) if _API else None
+    for i in range(view.topLevelItemCount() if view is not None else 0):
+        item = view.topLevelItem(i)
+        if _album_of(getattr(item, 'obj', None)) is not None:
+            for c in range(view.columnCount()):
+                item.setBackground(c, QtGui.QBrush())
+
+
+def _forget(albums) -> None:
+    for album in albums:
+        _ALBUMS.pop(_key(album), None)
+    _changed()
 
 
 class SwitcherBar(QtWidgets.QFrame):
@@ -155,27 +387,42 @@ class SwitcherBar(QtWidgets.QFrame):
         self._building = True
         try:
             s = _setting()
-            current = str(s['move_files_to'] or '')
+            albums = _selected_albums(self.window_)
+            default = _default()
+            shown = [dst.effective(_ALBUMS.get(_key(a)), default) for a in albums] or [default]
+            folders = {c['path'] for c in shown}
+            scripts = {c['script'] for c in shown}
+            current, active = shown[0]['path'], shown[0]['script']
+            self.save_label.setText(dst.scope_label([_title(a) for a in albums]))
             items, colours = _items_and_colours()
             titles = dict(dst.scripts(s['file_renaming_scripts']))
             self.dest_combo.clear()
-            active = str(s['active_file_naming_script_id'] or '')
             for i, (d, colour) in enumerate(zip(items, colours)):
                 # (data: the folder's place in your list - two of yours may share one folder)
                 self.dest_combo.addItem(_dot_icon(colour), dst.label(d), i)
                 sid = dst.linked_script(d, s['file_renaming_scripts'])
                 tip = d['path'] + (f'\nnaming script: {titles.get(sid, sid)}' if sid else '')
                 self.dest_combo.setItemData(self.dest_combo.count() - 1, tip, QtCore.Qt.ItemDataRole.ToolTipRole)
-            at = dst.index_of(items, current, active)
-            if at < 0 and current:
-                # (Picard's folder is none of yours: shown as it is, first, uncoloured)
+            mixed = len(folders) > 1 or (len(scripts) > 1 and
+                                         len({dst.index_of(items, c['path'], c['script']) for c in shown}) > 1)
+            at = -1 if mixed else dst.index_of(items, current, active)
+            if mixed:
+                self.dest_combo.insertItem(0, _dot_icon(''), '(several folders)', MIXED)
+            elif at < 0 and current:
+                # (a folder that is none of yours: shown as it is, first, uncoloured)
                 self.dest_combo.insertItem(0, _dot_icon(''), f'Other: {dst.default_name(current)}', current)
                 self.dest_combo.setItemData(0, current, QtCore.Qt.ItemDataRole.ToolTipRole)
             if not items:
                 self.dest_combo.addItem('Name your folders…', None)
-            self.dest_combo.setCurrentIndex(max(0, self.dest_combo.findData(at if at >= 0 else current)
-                                                if current else 0))
-            self.dest_combo.setToolTip(f"Picard's destination directory: {current or '(none)'}")
+            if any(_key(a) in _ALBUMS for a in albums):
+                self.dest_combo.insertSeparator(self.dest_combo.count())
+                self.dest_combo.addItem(_dot_icon(''), 'Same as every album', SAME)
+            pick = MIXED if mixed else (at if at >= 0 else current)
+            self.dest_combo.setCurrentIndex(max(0, self.dest_combo.findData(pick) if (mixed or current) else 0))
+            self.dest_combo.setToolTip(
+                (f'Where the selected albums go: {current or "(none)"}\nDeselect them to choose for every album'
+                 if albums else f"Where every album goes (Picard's destination directory): {current or '(none)'}"
+                 '\nSelect albums in the right pane to choose for them alone'))
             self.colour = colours[at] if at >= 0 else ''
             self._paint()
             self.move_box.setChecked(bool(s['move_files']))
@@ -183,10 +430,14 @@ class SwitcherBar(QtWidgets.QFrame):
             for w in (self.move_box, self.rename_box):
                 w.setVisible(bool(_own('show_switches')))
             self.script_combo.clear()
+            if len(scripts) > 1:
+                self.script_combo.addItem('(several scripts)', MIXED)
             for sid, title in dst.scripts(s['file_renaming_scripts']):
                 self.script_combo.addItem(title, sid)
-                if sid == active:
+                if sid == active and len(scripts) == 1:
                     self.script_combo.setCurrentIndex(self.script_combo.count() - 1)
+            self.script_combo.setToolTip('The naming script of the selected albums' if albums
+                                         else "Picard's active file naming script: every album's")
             for w in (self.script_sep, self.script_label, self.script_combo, self.edit_button):
                 w.setVisible(bool(_own('show_scripts')))
         finally:
@@ -221,6 +472,10 @@ class SwitcherBar(QtWidgets.QFrame):
     def setting_changed(self, name, _old, _new) -> None:
         if name in WATCHED and not self._building:
             QtCore.QTimer.singleShot(0, self.rebuild)
+            _retint_later()
+
+    def selection_changed(self) -> None:
+        QtCore.QTimer.singleShot(0, self.rebuild)
 
     # ---- changing them ----------------------------------------------------------------------
     def _set(self, key, value) -> None:
@@ -236,6 +491,11 @@ class SwitcherBar(QtWidgets.QFrame):
             _open_options(self.window_)
             self.rebuild()
             return
+        if data == MIXED:
+            return
+        if data == SAME:
+            _forget(_selected_albums(self.window_))
+            return
         items = dst.load(_own('destinations'))
         if isinstance(data, int) and 0 <= data < len(items):
             self._choose(items[data]['path'], data)
@@ -243,23 +503,31 @@ class SwitcherBar(QtWidgets.QFrame):
             self._choose(str(data))
 
     def _choose(self, path: str, at: int | None = None) -> None:
+        """Folder PATH (your folder AT) for the selected albums - none selected: for every album."""
+        items = dst.load(_own('destinations'))
+        albums = _selected_albums(self.window_)
+        if at is None:
+            at = dst.index_of(items, path, str(_setting()['active_file_naming_script_id'] or ''))
+        if albums:
+            _assign(albums, path, at)
+            return
         self._set('move_files_to', path)
         if _own('move_on_choose'):
             self._set('move_files', True)
         # the naming script linked to that folder, when you gave it one
-        items = dst.load(_own('destinations'))
-        if at is None:
-            at = dst.index_of(items, path, str(_setting()['active_file_naming_script_id'] or ''))
         sid = dst.linked_script(items[at], _setting()['file_renaming_scripts']) if at >= 0 else ''
         if sid:
             self._set('active_file_naming_script_id', sid)
         log = _log()
         if log:
-            log.info('Destination Switcher: saving to %s%s', path, f' with naming script {sid}' if sid else '')
-        self.rebuild()
+            log.info('Destination Switcher: every album saves to %s%s', path,
+                     f' with naming script {sid}' if sid else '')
+        _changed()
 
     def _browse(self) -> None:
-        start = str(_setting()['move_files_to'] or os.path.expanduser('~'))
+        albums = _selected_albums(self.window_)
+        start = (dst.effective(_ALBUMS.get(_key(albums[0])), _default())['path'] if albums
+                 else str(_setting()['move_files_to'] or '')) or os.path.expanduser('~')
         path = QtWidgets.QFileDialog.getExistingDirectory(self.window_, 'Save to', start)
         if path:
             self._choose(path)
@@ -272,7 +540,16 @@ class SwitcherBar(QtWidgets.QFrame):
         if self._building:
             return
         sid = self.script_combo.itemData(index)
-        if sid:
+        if not sid or sid == MIXED:
+            return
+        albums = _selected_albums(self.window_)
+        if albums:
+            default = _default()
+            for album in albums:
+                k = _key(album)
+                _ALBUMS[k] = {'path': dst.effective(_ALBUMS.get(k), default)['path'], 'script': str(sid)}
+            _changed()
+        else:
             self._set('active_file_naming_script_id', str(sid))
 
     def _edit_scripts(self) -> None:
@@ -324,18 +601,28 @@ def _place() -> None:
         window.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, host)
         _HOST = host
     _BAR = bar
-    _API.global_config.setting.setting_changed.connect(bar.setting_changed)
+    hooks = [(_API.global_config.setting.setting_changed, bar.setting_changed)]
+    view = _album_view(window)
+    if view is not None:
+        hooks += [(view.itemSelectionChanged, bar.selection_changed),
+                  (view.model().rowsInserted, _retint_later)]
+    for signal, slot in hooks:
+        signal.connect(slot)
+    _HOOKS[:] = hooks
+    _retint_later()
 
 
 def _remove() -> None:
     global _BAR, _HOST
     bar, host = _BAR, _HOST
     _BAR = _HOST = None
-    if bar is not None:
+    for signal, slot in _HOOKS:
         try:
-            _API.global_config.setting.setting_changed.disconnect(bar.setting_changed)
+            signal.disconnect(slot)
         except Exception:
             pass
+    _HOOKS.clear()
+    if bar is not None:
         bar.hide()
         bar.setParent(None)
         bar.deleteLater()
@@ -360,8 +647,10 @@ class DestinationOptionsPage(OptionsPage):
         super().__init__(parent=parent)
         layout = QtWidgets.QVBoxLayout(self)
         intro = QtWidgets.QLabel(
-            'The folders the "Save to" dropdown offers, in this order. Choosing one sets Picard\'s '
-            'destination directory (Options > File Naming), and the naming script you give it.', self)
+            'The folders the "Save to" dropdown offers, in this order. With albums selected in the '
+            'right pane, choosing one is for those albums alone (right-click: Save to folder… too); '
+            'with none selected, it sets Picard\'s destination directory (Options > File Naming) - '
+            'every other album\'s - and the naming script you give it.', self)
         intro.setWordWrap(True)
         layout.addWidget(intro)
         self.table = QtWidgets.QTableWidget(0, 4, self)
@@ -400,7 +689,9 @@ class DestinationOptionsPage(OptionsPage):
         self.move_on_choose_box = QtWidgets.QCheckBox('Choosing a folder turns Move files on', self)
         self.show_switches_box = QtWidgets.QCheckBox('Show Move files and Rename files', self)
         self.show_scripts_box = QtWidgets.QCheckBox('Show the naming script dropdown', self)
-        for w in (self.tagmender_box, self.move_on_choose_box, self.show_switches_box, self.show_scripts_box):
+        self.tint_box = QtWidgets.QCheckBox(
+            "Colour each album in the right pane with the colour of the folder it saves to", self)
+        for w in (self.tint_box, self.tagmender_box, self.move_on_choose_box, self.show_switches_box, self.show_scripts_box):
             layout.addWidget(w)
 
     def _combo(self, choices, value):
@@ -483,6 +774,7 @@ class DestinationOptionsPage(OptionsPage):
         self.move_on_choose_box.setChecked(bool(_own('move_on_choose')))
         self.show_switches_box.setChecked(bool(_own('show_switches')))
         self.show_scripts_box.setChecked(bool(_own('show_scripts')))
+        self.tint_box.setChecked(bool(_own('tint_albums')))
 
     def save(self):
         items = [dict(zip(('name', 'path', 'script', 'colour'), self._values(r)))
@@ -494,6 +786,8 @@ class DestinationOptionsPage(OptionsPage):
         _set_own('move_on_choose', self.move_on_choose_box.isChecked())
         _set_own('show_switches', self.show_switches_box.isChecked())
         _set_own('show_scripts', self.show_scripts_box.isChecked())
+        _set_own('tint_albums', self.tint_box.isChecked())
+        _retint_later()
         if moved or _BAR is None:
             QtCore.QTimer.singleShot(0, _place)
         else:
@@ -511,6 +805,11 @@ def enable(api) -> None:
             pass
     api.register_options_page(DestinationOptionsPage)
     try:
+        api.register_album_action(SaveToAction)
+    except Exception:
+        pass
+    _patch_saving()
+    try:
         _place()
     except Exception:
         log = _log()
@@ -519,7 +818,10 @@ def enable(api) -> None:
 
 
 def disable() -> None:
+    _unpatch_saving()
+    _ALBUMS.clear()
     try:
         _remove()
+        _untint()
     except Exception:
         pass
