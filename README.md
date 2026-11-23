@@ -18,7 +18,11 @@ profiles.
   folder…** does the same. *Same as every album* gives an album back to
   Picard's folder. With no album selected, the bar is for every other album
   (*Every album saves to:*). Each album row is tinted with the colour of the
-  folder it saves to.
+  folder it saves to, and a **Saves to** column in the right pane names it,
+  with a dot of its colour: **bold** when the album has a folder of its own,
+  *italic* when it follows every album. Hover it for the path and naming
+  script; click its header to sort albums by folder. (Right-click the header
+  to hide or show it, as with any of Picard's columns.)
 - **Save to** offers the folders you name in the plugin's settings — for
   example *Lossless* → `/music/lossless` and *Lossy* → `/music/lossy`.
   Choosing one sets Picard's destination directory (Options → File Naming →

@@ -54,6 +54,8 @@ _ALBUMS: dict = {}
 _ORIG_MAKE_FILENAME = None      # Picard's File.make_filename, while ours stands in for it
 _HOOKS: list = []               # (signal, slot) connected while the bar is shown
 _RETINT_DUE = False
+COLUMN_KEY = '~destination_switcher_saves_to'   # the "Saves to" column of the right pane
+COLUMN_TITLE = 'Saves to'
 MIXED, SAME = '\x00mixed', '\x00same'
 
 
@@ -199,8 +201,93 @@ def _retint() -> None:
         for c in range(view.columnCount()):
             if item.background(c) != brush:
                 item.setBackground(c, brush)
+        _mark_column(view, item, album)
     for k in [k for k in _ALBUMS if k not in present]:
         _ALBUMS.pop(k, None)
+
+
+def _where(album) -> tuple[str, str, bool, dict]:
+    """(folder name, colour, own?, {"path", "script"}) of where ALBUM saves: the name you gave
+    that folder (none named: the folder's own name)."""
+    own = _ALBUMS.get(_key(album))
+    there = dst.effective(own, _default())
+    items, colours = _items_and_colours()
+    at = dst.index_of(items, there['path'], there['script'])
+    name = dst.label(items[at]) if at >= 0 else (dst.default_name(there['path']) if there['path'] else '')
+    return name, (colours[at] if at >= 0 else ''), bool(own), there
+
+
+def _column_text(obj) -> str:
+    """The "Saves to" column: an album's folder (tracks and files: nothing, their album says)."""
+    try:
+        from picard.album import Album
+    except ImportError:
+        return ''
+    if not isinstance(obj, Album):
+        return ''
+    return _where(obj)[0]
+
+
+def _column_index(view):
+    try:
+        return view.columns.pos(COLUMN_KEY)
+    except Exception:
+        return -1
+
+
+def _headers_updated() -> None:
+    try:
+        from picard.ui.itemviews.events import header_events
+        header_events.headers_updated.emit()
+    except Exception:
+        pass
+
+
+def _add_column() -> None:
+    """A "Saves to" column in the right pane: each album's folder, with its colour."""
+    try:
+        from picard.ui.itemviews.custom_columns import make_callable_column, registry
+        registry.register(make_callable_column(COLUMN_TITLE, COLUMN_KEY, _column_text, width=120),
+                          add_to={'ALBUM_VIEW'})
+    except Exception:
+        log = _log()
+        if log:
+            log.error('Destination Switcher: the "Saves to" column could not be added', exc_info=True)
+        return
+    _headers_updated()
+
+
+def _remove_column() -> None:
+    try:
+        from picard.ui.itemviews.custom_columns import registry
+        registry.unregister(COLUMN_KEY)
+    except Exception:
+        return
+    _headers_updated()
+
+
+def _mark_column(view, item, album) -> None:
+    """The "Saves to" cell of ALBUM: folder name, a dot of its colour, its path and naming script
+    on hover; italic while the album follows every album (bold: a folder of its own)."""
+    c = _column_index(view)
+    if c < 0:
+        return
+    name, colour, own, there = _where(album)
+    if item.text(c) != name:
+        item.setText(c, name)
+    item.setIcon(c, _dot_icon(colour) if colour else QtGui.QIcon())
+    font = QtGui.QFont(item.font(c))
+    font.setItalic(not own)
+    font.setBold(own)
+    item.setFont(c, font)
+    title = ''
+    try:
+        title = dict(dst.scripts(_setting()['file_renaming_scripts'])).get(there['script'], '')
+    except Exception:
+        pass
+    item.setToolTip(c, '\n'.join(x for x in (
+        f"{name} - {'this album alone' if own else 'as every album'}",
+        there['path'], f'Naming script: {title}' if title else '') if x))
 
 
 def _retint_later(*_args) -> None:
@@ -809,6 +896,7 @@ def enable(api) -> None:
     except Exception:
         pass
     _patch_saving()
+    _add_column()
     try:
         _place()
     except Exception:
@@ -820,6 +908,7 @@ def enable(api) -> None:
 def disable() -> None:
     _unpatch_saving()
     _ALBUMS.clear()
+    _remove_column()
     try:
         _remove()
         _untint()
