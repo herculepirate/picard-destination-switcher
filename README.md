@@ -16,7 +16,9 @@ profiles.
   Choosing one sets Picard's destination directory (Options → File Naming →
   *Move files to this directory*) and turns *Move files* on — and, when you
   linked a naming script to that folder, makes it the active script
-  (*classical* → *classical_unraid*). A folder that is
+  (*classical* → *classical_unraid*). One folder can be named twice with two
+  scripts (*lossyless* → *allmusic_unraid*, *lossyless_va* →
+  *variousartists_unraid*); the bar shows the one whose script is active. A folder that is
   none of yours shows as *Other: …*; **Browse…** picks any folder.
 - **Naming script** lists every file naming script Picard knows, as Options →
   File naming scripts does; **Edit…** opens Picard's script editor.

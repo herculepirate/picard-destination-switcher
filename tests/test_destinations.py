@@ -82,5 +82,16 @@ class Destinations(unittest.TestCase):
         self.assertEqual(dst.scripts(scripts), [('c', 'c'), ('a', 'My script'), ('b', 'Preset 2: Album/Track')])
 
 
+class SharedFolder(unittest.TestCase):
+    def test_two_names_one_folder(self):
+        items = dst.load('[{"name": "lossyless", "path": "/m/ll", "script": "all"},'
+                         ' {"name": "lossyless_va", "path": "/m/ll", "script": "va"}]')
+        self.assertEqual(dst.index_of(items, '/m/ll', 'va'), 1)
+        self.assertEqual(dst.index_of(items, '/m/ll/', 'all'), 0)
+        self.assertEqual(dst.index_of(items, '/m/ll', 'other'), 0)
+        self.assertEqual(dst.index_of(items, '/m/ll'), 0)
+        self.assertEqual(dst.index_of(items, '/m/x', 'va'), -1)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -56,9 +56,18 @@ def same_folder(a: str, b: str) -> bool:
     return bool(norm(a)) and norm(a) == norm(b)
 
 
-def index_of(items, current: str) -> int:
-    """Which destination Picard's current folder is (-1: none of them)."""
-    return next((i for i, d in enumerate(items) if same_folder(d['path'], current)), -1)
+def index_of(items, current: str, active_script: str = '') -> int:
+    """Which destination Picard's current folder is (-1: none of them). Two of yours with one
+    folder (lossyless with allmusic, lossyless_va with variousartists): the one whose naming
+    script is Picard's active script, else the first."""
+    there = [i for i, d in enumerate(items) if same_folder(d['path'], current)]
+    if not there:
+        return -1
+    return next((i for i in there if active_script and d_script(items[i]) == active_script), there[0])
+
+
+def d_script(d: dict) -> str:
+    return str((d or {}).get('script') or '')
 
 
 def label(d: dict) -> str:

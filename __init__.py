@@ -159,19 +159,22 @@ class SwitcherBar(QtWidgets.QFrame):
             items, colours = _items_and_colours()
             titles = dict(dst.scripts(s['file_renaming_scripts']))
             self.dest_combo.clear()
-            for d, colour in zip(items, colours):
-                self.dest_combo.addItem(_dot_icon(colour), dst.label(d), d['path'])
+            active = str(s['active_file_naming_script_id'] or '')
+            for i, (d, colour) in enumerate(zip(items, colours)):
+                # (data: the folder's place in your list - two of yours may share one folder)
+                self.dest_combo.addItem(_dot_icon(colour), dst.label(d), i)
                 sid = dst.linked_script(d, s['file_renaming_scripts'])
                 tip = d['path'] + (f'\nnaming script: {titles.get(sid, sid)}' if sid else '')
                 self.dest_combo.setItemData(self.dest_combo.count() - 1, tip, QtCore.Qt.ItemDataRole.ToolTipRole)
-            at = dst.index_of(items, current)
+            at = dst.index_of(items, current, active)
             if at < 0 and current:
                 # (Picard's folder is none of yours: shown as it is, first, uncoloured)
                 self.dest_combo.insertItem(0, _dot_icon(''), f'Other: {dst.default_name(current)}', current)
                 self.dest_combo.setItemData(0, current, QtCore.Qt.ItemDataRole.ToolTipRole)
             if not items:
                 self.dest_combo.addItem('Name your folders…', None)
-            self.dest_combo.setCurrentIndex(max(0, self.dest_combo.findData(current) if current else 0))
+            self.dest_combo.setCurrentIndex(max(0, self.dest_combo.findData(at if at >= 0 else current)
+                                                if current else 0))
             self.dest_combo.setToolTip(f"Picard's destination directory: {current or '(none)'}")
             self.colour = colours[at] if at >= 0 else ''
             self._paint()
@@ -180,7 +183,6 @@ class SwitcherBar(QtWidgets.QFrame):
             for w in (self.move_box, self.rename_box):
                 w.setVisible(bool(_own('show_switches')))
             self.script_combo.clear()
-            active = str(s['active_file_naming_script_id'] or '')
             for sid, title in dst.scripts(s['file_renaming_scripts']):
                 self.script_combo.addItem(title, sid)
                 if sid == active:
@@ -229,20 +231,25 @@ class SwitcherBar(QtWidgets.QFrame):
     def _dest_chosen(self, index) -> None:
         if self._building:
             return
-        path = self.dest_combo.itemData(index)
-        if not path:
+        data = self.dest_combo.itemData(index)
+        if data is None or data == '':
             _open_options(self.window_)
             self.rebuild()
             return
-        self._choose(str(path))
+        items = dst.load(_own('destinations'))
+        if isinstance(data, int) and 0 <= data < len(items):
+            self._choose(items[data]['path'], data)
+        else:
+            self._choose(str(data))
 
-    def _choose(self, path: str) -> None:
+    def _choose(self, path: str, at: int | None = None) -> None:
         self._set('move_files_to', path)
         if _own('move_on_choose'):
             self._set('move_files', True)
         # the naming script linked to that folder, when you gave it one
         items = dst.load(_own('destinations'))
-        at = dst.index_of(items, path)
+        if at is None:
+            at = dst.index_of(items, path, str(_setting()['active_file_naming_script_id'] or ''))
         sid = dst.linked_script(items[at], _setting()['file_renaming_scripts']) if at >= 0 else ''
         if sid:
             self._set('active_file_naming_script_id', sid)
