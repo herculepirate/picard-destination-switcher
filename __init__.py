@@ -24,8 +24,10 @@ from picard.plugin3.api import BaseAction, OptionsPage
 
 try:
     from . import destinations as dst
+    from . import sweep
 except ImportError:  # run outside Picard (tests)
     import destinations as dst
+    import sweep
 
 # the plugin's own settings, with their defaults
 DEFAULTS = {
@@ -36,6 +38,7 @@ DEFAULTS = {
     'show_switches': True,         # Move files / Rename files on the bar
     'show_scripts': True,          # the naming script dropdown
     'tint_albums': True,           # each album in the right pane tinted with its folder's colour
+    'sweep_album_folder': True,    # what is left in an album's old folder (covers/, logs) goes with it
 }
 PLACEMENTS = (('right', 'Above the right pane (where files go)'),
               ('left', 'Above the left pane (the files)'),
@@ -52,6 +55,10 @@ _HOST = None                    # the toolbar holding the bar, when placed on on
 # each album's own folder and naming script: {album id: {"path", "script"}} (none: Picard's)
 _ALBUMS: dict = {}
 _ORIG_MAKE_FILENAME = None      # Picard's File.make_filename, while ours stands in for it
+_ORIG_SAVE_AND_RENAME = None    # Picard's File._save_and_rename, while ours stands in for it
+# each album's folders this session: {album key: {"old": {dirs}, "new": {dirs}}}
+_SWEEP: dict = {}
+_SWEEP_LOCK = __import__('threading').Lock()
 _HOOKS: list = []               # (signal, slot) connected while the bar is shown
 _RETINT_DUE = False
 COLUMN_KEY = '~destination_switcher_saves_to'   # the "Saves to" column of the right pane
@@ -350,6 +357,92 @@ def _patch_saving() -> None:
 
     File.make_filename = make_filename
     _ORIG_MAKE_FILENAME = original
+
+
+def _after_save(file, old_filename, new_filename) -> None:
+    """A file was saved (on Picard's saving thread). When it moved and its album's old folder
+    now holds no audio, what is left there goes to the album's new folder (sweep)."""
+    if not new_filename or not old_filename or not _own('sweep_album_folder'):
+        return
+    old_dir, new_dir = os.path.dirname(old_filename), os.path.dirname(new_filename)
+    if os.path.normpath(old_dir) == os.path.normpath(new_dir):
+        return
+    s = _setting()
+    album = _album_of(file)
+    key = _key(album) if album is not None else f'file:{old_dir}'
+    log = _log()
+    with _SWEEP_LOCK:
+        rec = _SWEEP.setdefault(key, {'old': set(), 'new': set()})
+        rec['old'].add(old_dir)
+        rec['new'].add(new_dir)
+        old_root, new_root = sweep.album_root(rec['old']), sweep.album_root(rec['new'])
+        moves = sweep.plan(old_root, new_root, rec['old'], rec['new'])
+        if not moves:
+            return
+        moved, skipped = sweep.apply(moves, overwrite=bool(s['move_overwrite_existing_files']))
+        if log:
+            log.info('Destination Switcher: moved %d item(s) left in %s to %s%s', len(moved), old_root,
+                     new_root, f' ({len(skipped)} already there, left behind)' if skipped else '')
+        if s['delete_empty_dirs'] and not skipped:
+            _remove_empty_upwards(old_root)
+        _SWEEP.pop(key, None)
+
+
+def _remove_empty_upwards(folder: str) -> None:
+    """FOLDER and its parents removed while empty, as Picard removes a moved file's folders."""
+    try:
+        from picard.util import emptydir
+    except ImportError:
+        sweep.remove_if_empty(folder)
+        return
+    sweep.remove_if_empty(folder)          # (its empty sub-folders, which emptydir does not take)
+    head = folder
+    try:
+        while head:
+            if os.path.isdir(head):
+                emptydir.rm_empty_dir(head)
+            head, tail = os.path.split(head)
+            if not tail:
+                break
+    except (OSError, emptydir.SkipRemoveDir):
+        pass
+
+
+def _patch_sweep() -> None:
+    global _ORIG_SAVE_AND_RENAME
+    if _ORIG_SAVE_AND_RENAME is not None:
+        return
+    try:
+        from picard.file import File
+    except ImportError:
+        return
+    original = File._save_and_rename
+
+    def _save_and_rename(self, old_filename, metadata):
+        new_filename = original(self, old_filename, metadata)
+        try:
+            _after_save(self, old_filename, new_filename)
+        except Exception:
+            log = _log()
+            if log:
+                log.error('Destination Switcher: the album folder\'s other files could not be moved',
+                          exc_info=True)
+        return new_filename
+
+    File._save_and_rename = _save_and_rename
+    _ORIG_SAVE_AND_RENAME = original
+
+
+def _unpatch_sweep() -> None:
+    global _ORIG_SAVE_AND_RENAME
+    if _ORIG_SAVE_AND_RENAME is None:
+        return
+    try:
+        from picard.file import File
+        File._save_and_rename = _ORIG_SAVE_AND_RENAME
+    except ImportError:
+        pass
+    _ORIG_SAVE_AND_RENAME = None
 
 
 def _unpatch_saving() -> None:
@@ -778,7 +871,14 @@ class DestinationOptionsPage(OptionsPage):
         self.show_scripts_box = QtWidgets.QCheckBox('Show the naming script dropdown', self)
         self.tint_box = QtWidgets.QCheckBox(
             "Colour each album in the right pane with the colour of the folder it saves to", self)
-        for w in (self.tint_box, self.tagmender_box, self.move_on_choose_box, self.show_switches_box, self.show_scripts_box):
+        self.sweep_box = QtWidgets.QCheckBox(
+            "Move everything left in an album's folder with it (covers/, logs, booklets)", self)
+        self.sweep_box.setToolTip(
+            "Picard's \"Move additional files\" looks only beside each audio file: in a set of\n"
+            "discs the covers folder, rip log and booklet beside CD1/ and CD2/ stay behind.\n"
+            "With this on, once an album's old folder holds no audio any more, whatever is\n"
+            "left in it - files and folders - is moved into the album's new folder.")
+        for w in (self.sweep_box, self.tint_box, self.tagmender_box, self.move_on_choose_box, self.show_switches_box, self.show_scripts_box):
             layout.addWidget(w)
 
     def _combo(self, choices, value):
@@ -862,6 +962,7 @@ class DestinationOptionsPage(OptionsPage):
         self.show_switches_box.setChecked(bool(_own('show_switches')))
         self.show_scripts_box.setChecked(bool(_own('show_scripts')))
         self.tint_box.setChecked(bool(_own('tint_albums')))
+        self.sweep_box.setChecked(bool(_own('sweep_album_folder')))
 
     def save(self):
         items = [dict(zip(('name', 'path', 'script', 'colour'), self._values(r)))
@@ -874,6 +975,7 @@ class DestinationOptionsPage(OptionsPage):
         _set_own('show_switches', self.show_switches_box.isChecked())
         _set_own('show_scripts', self.show_scripts_box.isChecked())
         _set_own('tint_albums', self.tint_box.isChecked())
+        _set_own('sweep_album_folder', self.sweep_box.isChecked())
         _retint_later()
         if moved or _BAR is None:
             QtCore.QTimer.singleShot(0, _place)
@@ -896,6 +998,7 @@ def enable(api) -> None:
     except Exception:
         pass
     _patch_saving()
+    _patch_sweep()
     _add_column()
     try:
         _place()
@@ -907,6 +1010,7 @@ def enable(api) -> None:
 
 def disable() -> None:
     _unpatch_saving()
+    _unpatch_sweep()
     _ALBUMS.clear()
     _remove_column()
     try:

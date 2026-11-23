@@ -23,6 +23,17 @@ profiles.
   *italic* when it follows every album. Hover it for the path and naming
   script; click its header to sort albums by folder. (Right-click the header
   to hide or show it, as with any of Picard's columns.)
+- **Everything in the album's folder goes with it.** Picard's own *Move
+  additional files* looks only beside each audio file, so in a set of discs
+  the `covers/` folder, rip log, cue sheet and booklet sitting beside `CD1/`
+  and `CD2/` stayed behind. Now, once an album's old folder holds no audio any
+  more, whatever is left in it — files and whole folders — is moved into the
+  album's new folder (a leftover `CD1/` cue goes into the new `CD1/`), and the
+  emptied folder is removed when Picard's *Delete empty directories* is on. A
+  folder that still holds music (an album saved in part, an artist's folder of
+  several albums) is never touched; a file already at the destination is kept
+  unless Picard's *Overwrite existing files* is on. Option: **"Move everything
+  left in an album's folder with it"** (on).
 - **Save to** offers the folders you name in the plugin's settings — for
   example *Lossless* → `/music/lossless` and *Lossy* → `/music/lossy`.
   Choosing one sets Picard's destination directory (Options → File Naming →
