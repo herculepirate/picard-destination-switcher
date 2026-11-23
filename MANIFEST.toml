@@ -1,8 +1,8 @@
 uuid = "83975fea-b4d6-42af-9353-c45d7e3f343e"
 name = "Destination Switcher"
-description = "Pick where Picard saves and which file naming script it uses from a toolbar on the main window."
+description = "Pick where Picard saves and which file naming script it uses from a colour-coded bar above its panes."
 api = ["3.0"]
-version = "0.2.0"
+version = "0.3.0"
 authors = ["herculepirate"]
 maintainers = ["herculepirate"]
 license = "GPL-2.0-or-later"
@@ -11,7 +11,8 @@ categories = ["ui"]
 homepage = "https://github.com/herculepirate/picard-destination-switcher"
 report_bugs_to = "https://github.com/herculepirate/picard-destination-switcher/issues"
 long_description = """
-A toolbar on Picard's main window with two dropdowns:
+A bar above Picard's right pane (or the left pane, or a toolbar) with two
+dropdowns, tinted with the colour of the folder Picard saves to:
 
 **Save to.** The folders you name in the plugin's settings - for example
 Lossless and Lossy - one click apart. Choosing one sets Picard's destination
@@ -22,7 +23,10 @@ the active script. Browse... picks any other folder for this session.
 **Naming script.** Every file naming script Picard knows, as in Options >
 File naming scripts; Edit... opens Picard's script editor.
 
-Move files and Rename files can be switched from the toolbar too. Everything
+Each folder has a colour, as TagMender colours its profiles (the profile
+saving to that folder, else lossyless green, extreme orange, the rest in
+turn), or one you choose. Move files and Rename files can be switched from
+the bar too. Everything
 is Picard's own setting: the toolbar only shows and changes it, and follows
 when you change it elsewhere. Settings under Options > Plugins > Destination
 Switcher.
