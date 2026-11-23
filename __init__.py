@@ -110,10 +110,12 @@ class DestinationToolbar(QtWidgets.QToolBar):
             current = str(s['move_files_to'] or '')
             items = dst.load(_own('destinations'))
             self.dest_combo.clear()
+            titles = dict(dst.scripts(s['file_renaming_scripts']))
             for d in items:
                 self.dest_combo.addItem(dst.label(d), d['path'])
-                self.dest_combo.setItemData(self.dest_combo.count() - 1, d['path'],
-                                            QtCore.Qt.ItemDataRole.ToolTipRole)
+                sid = dst.linked_script(d, s['file_renaming_scripts'])
+                tip = d['path'] + (f'\nnaming script: {titles.get(sid, sid)}' if sid else '')
+                self.dest_combo.setItemData(self.dest_combo.count() - 1, tip, QtCore.Qt.ItemDataRole.ToolTipRole)
             at = dst.index_of(items, current)
             if at < 0 and current:
                 # (Picard's folder is none of yours: shown as it is, first)
@@ -163,9 +165,15 @@ class DestinationToolbar(QtWidgets.QToolBar):
         self._set('move_files_to', path)
         if _own('move_on_choose'):
             self._set('move_files', True)
+        # the naming script linked to that folder, when you gave it one
+        items = dst.load(_own('destinations'))
+        at = dst.index_of(items, path)
+        sid = dst.linked_script(items[at], _setting()['file_renaming_scripts']) if at >= 0 else ''
+        if sid:
+            self._set('active_file_naming_script_id', sid)
         log = _log()
         if log:
-            log.info('Destination Switcher: saving to %s', path)
+            log.info('Destination Switcher: saving to %s%s', path, f' with naming script {sid}' if sid else '')
         self.rebuild()
 
     def _browse(self) -> None:
@@ -213,9 +221,11 @@ class DestinationOptionsPage(OptionsPage):
             'Picard\'s destination directory (Options > File Naming).', self)
         intro.setWordWrap(True)
         layout.addWidget(intro)
-        self.table = QtWidgets.QTableWidget(0, 2, self)
-        self.table.setHorizontalHeaderLabels(['Name', 'Folder'])
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table = QtWidgets.QTableWidget(0, 3, self)
+        self.table.setHorizontalHeaderLabels(['Name', 'Folder', 'Naming script'])
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         layout.addWidget(self.table, 1)
@@ -229,7 +239,8 @@ class DestinationOptionsPage(OptionsPage):
         row.addStretch(1)
         layout.addLayout(row)
         hint = QtWidgets.QLabel('For example: Lossless → /music/lossless, Lossy → /music/lossy. '
-                                'Double-click a name to rename it.', self)
+                                'Double-click a name to rename it. A naming script given to a folder is '
+                                'chosen with it; "Keep current" leaves the script as it is.', self)
         hint.setWordWrap(True)
         layout.addWidget(hint)
         self.move_on_choose_box = QtWidgets.QCheckBox('Choosing a folder turns Move files on', self)
@@ -238,13 +249,27 @@ class DestinationOptionsPage(OptionsPage):
         for w in (self.move_on_choose_box, self.show_switches_box, self.show_scripts_box):
             layout.addWidget(w)
 
-    def _row(self, name, path) -> None:
+    def _row(self, name, path, script='') -> None:
         r = self.table.rowCount()
         self.table.insertRow(r)
         self.table.setItem(r, 0, QtWidgets.QTableWidgetItem(name))
         item = QtWidgets.QTableWidgetItem(path)
         item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
         self.table.setItem(r, 1, item)
+        combo = QtWidgets.QComboBox(self.table)
+        combo.addItem('Keep current', '')
+        for sid, title in dst.scripts(_setting()['file_renaming_scripts']):
+            combo.addItem(title, sid)
+        at = combo.findData(script or '')
+        if at < 0 and script:
+            combo.addItem(f'(missing script {script[:8]})', script)
+            at = combo.count() - 1
+        combo.setCurrentIndex(max(0, at))
+        self.table.setCellWidget(r, 2, combo)
+
+    def _script_at(self, r) -> str:
+        combo = self.table.cellWidget(r, 2)
+        return str(combo.currentData() or '') if combo is not None else ''
 
     def _pick(self, start='') -> str:
         return QtWidgets.QFileDialog.getExistingDirectory(self, 'Folder', start or os.path.expanduser('~'))
@@ -272,23 +297,27 @@ class DestinationOptionsPage(OptionsPage):
         to = r + step
         if r < 0 or not 0 <= to < self.table.rowCount():
             return
-        a = [self.table.item(r, c).text() for c in (0, 1)]
-        b = [self.table.item(to, c).text() for c in (0, 1)]
+        a = [self.table.item(r, c).text() for c in (0, 1)] + [self._script_at(r)]
+        b = [self.table.item(to, c).text() for c in (0, 1)] + [self._script_at(to)]
         for c in (0, 1):
             self.table.item(r, c).setText(b[c])
             self.table.item(to, c).setText(a[c])
+        for row, sid in ((r, b[2]), (to, a[2])):
+            combo = self.table.cellWidget(row, 2)
+            combo.setCurrentIndex(max(0, combo.findData(sid)))
         self.table.setCurrentCell(to, 0)
 
     def load(self):
         self.table.setRowCount(0)
         for d in dst.load(_own('destinations')):
-            self._row(d['name'], d['path'])
+            self._row(d['name'], d['path'], d.get('script', ''))
         self.move_on_choose_box.setChecked(bool(_own('move_on_choose')))
         self.show_switches_box.setChecked(bool(_own('show_switches')))
         self.show_scripts_box.setChecked(bool(_own('show_scripts')))
 
     def save(self):
-        items = [{'name': self.table.item(r, 0).text(), 'path': self.table.item(r, 1).text()}
+        items = [{'name': self.table.item(r, 0).text(), 'path': self.table.item(r, 1).text(),
+                  'script': self._script_at(r)}
                  for r in range(self.table.rowCount())]
         _set_own('destinations', dst.dump(items))
         _set_own('move_on_choose', self.move_on_choose_box.isChecked())

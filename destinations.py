@@ -1,7 +1,8 @@
 """The destinations you name, and how the toolbar shows them. Pure Python: no Qt, no Picard.
 
-A destination is {"name": "Lossless", "path": "/music/lossless"}. They are kept in the plugin's
-settings as JSON text, in the order you put them.
+A destination is {"name": "Lossless", "path": "/music/lossless", "script": "<naming script id>"};
+"script" is optional - the file naming script chosen with that folder ("" keeps the current
+one). They are kept in the plugin's settings as JSON text, in the order you put them.
 """
 from __future__ import annotations
 
@@ -19,15 +20,23 @@ def load(text) -> list[dict]:
     for d in data if isinstance(data, list) else []:
         if isinstance(d, dict) and str(d.get('path') or '').strip():
             path = str(d['path']).strip()
-            out.append({'name': str(d.get('name') or '').strip() or default_name(path), 'path': path})
+            out.append({'name': str(d.get('name') or '').strip() or default_name(path), 'path': path,
+                        'script': str(d.get('script') or '').strip()})
     return out
 
 
 def dump(items) -> str:
     """The destinations as the settings' JSON text (empty paths left out)."""
-    return json.dumps([{'name': str(d.get('name') or '').strip() or default_name(str(d.get('path') or '')),
-                        'path': str(d.get('path') or '').strip()}
-                       for d in items or () if str(d.get('path') or '').strip()], ensure_ascii=False)
+    out = []
+    for d in items or ():
+        path = str(d.get('path') or '').strip()
+        if not path:
+            continue
+        item = {'name': str(d.get('name') or '').strip() or default_name(path), 'path': path}
+        if str(d.get('script') or '').strip():
+            item['script'] = str(d['script']).strip()
+        out.append(item)
+    return json.dumps(out, ensure_ascii=False)
 
 
 def default_name(path: str) -> str:
@@ -61,3 +70,10 @@ def scripts(naming_scripts: dict) -> list[tuple[str, str]]:
         title = (s.get('title') if isinstance(s, dict) else getattr(s, 'title', '')) or str(sid)
         out.append((str(sid), str(title)))
     return sorted(out, key=lambda x: x[1].casefold())
+
+
+def linked_script(d: dict, naming_scripts: dict) -> str:
+    """The naming script chosen with destination D: its id when Picard still has that script,
+    else "" (the current script stays)."""
+    sid = str((d or {}).get('script') or '')
+    return sid if sid and sid in (naming_scripts or {}) else ''

@@ -2,7 +2,7 @@ uuid = "83975fea-b4d6-42af-9353-c45d7e3f343e"
 name = "Destination Switcher"
 description = "Pick where Picard saves and which file naming script it uses from a toolbar on the main window."
 api = ["3.0"]
-version = "0.1.0"
+version = "0.2.0"
 authors = ["herculepirate"]
 maintainers = ["herculepirate"]
 license = "GPL-2.0-or-later"
@@ -15,8 +15,9 @@ A toolbar on Picard's main window with two dropdowns:
 
 **Save to.** The folders you name in the plugin's settings - for example
 Lossless and Lossy - one click apart. Choosing one sets Picard's destination
-directory (Options > File Naming > Move files to this directory) and turns
-Move files on. Browse... picks any other folder for this session.
+directory (Options > File Naming > Move files to this directory), turns
+Move files on and, when you linked a naming script to that folder, makes it
+the active script. Browse... picks any other folder for this session.
 
 **Naming script.** Every file naming script Picard knows, as in Options >
 File naming scripts; Edit... opens Picard's script editor.

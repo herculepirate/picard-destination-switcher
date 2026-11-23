@@ -11,7 +11,9 @@ Save to: [Lossless ▾] [Browse…] [✓ Move files] [✓ Rename files] │ Nami
 - **Save to** offers the folders you name in the plugin's settings — for
   example *Lossless* → `/music/lossless` and *Lossy* → `/music/lossy`.
   Choosing one sets Picard's destination directory (Options → File Naming →
-  *Move files to this directory*) and turns *Move files* on. A folder that is
+  *Move files to this directory*) and turns *Move files* on — and, when you
+  linked a naming script to that folder, makes it the active script
+  (*classical* → *classical_unraid*). A folder that is
   none of yours shows as *Other: …*; **Browse…** picks any folder.
 - **Naming script** lists every file naming script Picard knows, as Options →
   File naming scripts does; **Edit…** opens Picard's script editor.
@@ -27,7 +29,7 @@ the Options menu, and the toolbar shows it.
 
 | Setting | Default |
 | --- | --- |
-| Your folders: name and path, in the order the dropdown shows them (Add, Change, Remove, Up, Down; double-click a name to rename) | none |
+| Your folders: name, path and (optionally) the naming script chosen with it, in the order the dropdown shows them (Add, Change, Remove, Up, Down; double-click a name to rename; *Keep current* leaves the script as it is) | none |
 | Choosing a folder turns Move files on | on |
 | Show Move files and Rename files on the toolbar | on |
 | Show the naming script dropdown | on |

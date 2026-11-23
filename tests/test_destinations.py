@@ -15,8 +15,8 @@ class Destinations(unittest.TestCase):
         items = [{'name': 'Lossless', 'path': '/music/lossless'}, {'name': '', 'path': '/music/lossy/'},
                  {'name': 'empty', 'path': '  '}]
         back = dst.load(dst.dump(items))
-        self.assertEqual(back, [{'name': 'Lossless', 'path': '/music/lossless'},
-                                {'name': 'lossy', 'path': '/music/lossy/'}])
+        self.assertEqual(back, [{'name': 'Lossless', 'path': '/music/lossless', 'script': ''},
+                                {'name': 'lossy', 'path': '/music/lossy/', 'script': ''}])
 
     def test_unreadable(self):
         self.assertEqual(dst.load('not json'), [])
@@ -30,6 +30,17 @@ class Destinations(unittest.TestCase):
         self.assertEqual(dst.index_of(items, '/music/./lossless'), 0)
         self.assertEqual(dst.index_of(items, '/elsewhere'), -1)
         self.assertEqual(dst.index_of(items, ''), -1)
+
+    def test_linked_script(self):
+        items = dst.load(dst.dump([{'name': 'classical', 'path': '/m/classical', 'script': 'cls'},
+                                   {'name': 'lossy', 'path': '/m/lossy', 'script': ''}]))
+        self.assertEqual(items[0]['script'], 'cls')
+        self.assertNotIn('script', dst.load(dst.dump(items))[1] if False else {})
+        scripts = {'cls': {'title': 'classical_unraid'}}
+        self.assertEqual(dst.linked_script(items[0], scripts), 'cls')
+        self.assertEqual(dst.linked_script(items[1], scripts), '')          # (keep current)
+        self.assertEqual(dst.linked_script(items[0], {}), '')               # (script deleted since)
+        self.assertNotIn('"script"', dst.dump(items[1:]))
 
     def test_scripts_sorted_by_title(self):
         scripts = {'b': {'title': 'Preset 2: Album/Track'}, 'a': {'title': 'My script'}, 'c': {}}
