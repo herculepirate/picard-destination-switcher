@@ -50,6 +50,17 @@ def album_root(dirs) -> str | None:
     return None
 
 
+def album_dirs(pairs) -> tuple[set, set]:
+    """({old folders}, {new folders}) of an album's files, from [(old name, new name)]."""
+    old, new = set(), set()
+    for before, after in pairs:
+        if before:
+            old.add(os.path.normpath(os.path.dirname(before)))
+        if after:
+            new.add(os.path.normpath(os.path.dirname(after)))
+    return old, new
+
+
 def holds_audio(root: str) -> bool:
     for _dir, _sub, names in os.walk(root):
         if any(os.path.splitext(n)[1].lower() in AUDIO_EXT for n in names):

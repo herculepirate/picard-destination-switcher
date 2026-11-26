@@ -57,7 +57,9 @@ _ALBUMS: dict = {}
 _ORIG_MAKE_FILENAME = None      # Picard's File.make_filename, while ours stands in for it
 _ORIG_SAVE_AND_RENAME = None    # Picard's File._save_and_rename, while ours stands in for it
 # each album's folders this session: {album key: {"old": {dirs}, "new": {dirs}}}
-_SWEEP: dict = {}
+_ORIG_SAVE = None               # Picard's File.save, while ours stands in for it
+# {(album id, its files' names)}: the album's old and new folders, worked out once per save of it
+_ALBUM_DIRS: dict = {}
 _SWEEP_LOCK = __import__('threading').Lock()
 _HOOKS: list = []               # (signal, slot) connected while the bar is shown
 _RETINT_DUE = False
@@ -359,24 +361,47 @@ def _patch_saving() -> None:
     _ORIG_MAKE_FILENAME = original
 
 
-def _after_save(file, old_filename, new_filename) -> None:
+def _album_dirs(file):
+    """The folders FILE's album is in now and will be saved to: ({old dirs}, {new dirs}), or None
+    (not in an album). On Picard's main thread, when the save starts: the saving thread must not
+    read the album, and nothing is kept from one save of the album to the next."""
+    album = _album_of(file)
+    if album is None:
+        # a cluster's files (an album not matched): the cluster is the album
+        album = getattr(file, 'parent_item', None)
+        if album is None or not hasattr(album, 'iterfiles'):
+            return None
+    try:
+        files = list(album.iterfiles(save=True))
+    except TypeError:
+        files = list(album.iterfiles())
+    if file not in files:
+        return None
+    key = (id(album), tuple(f.filename for f in files))
+    hit = _ALBUM_DIRS.get(key)
+    if hit is None:
+        if len(_ALBUM_DIRS) > 64:
+            _ALBUM_DIRS.clear()
+        hit = _ALBUM_DIRS[key] = sweep.album_dirs(
+            (f.filename, f.make_filename(f.filename, f.metadata)) for f in files)
+    return hit
+
+
+def _after_save(file, old_filename, new_filename, dirs) -> None:
     """A file was saved (on Picard's saving thread). When it moved and its album's old folder
-    now holds no audio, what is left there goes to the album's new folder (sweep)."""
-    if not new_filename or not old_filename or not _own('sweep_album_folder'):
+    now holds no audio, what is left there goes to the album's new folder (sweep). DIRS: the
+    album's folders when the save started (_album_dirs)."""
+    if not new_filename or not old_filename or not dirs or not _own('sweep_album_folder'):
         return
     old_dir, new_dir = os.path.dirname(old_filename), os.path.dirname(new_filename)
     if os.path.normpath(old_dir) == os.path.normpath(new_dir):
         return
     s = _setting()
-    album = _album_of(file)
-    key = _key(album) if album is not None else f'file:{old_dir}'
     log = _log()
+    old_dirs, new_dirs = dirs
     with _SWEEP_LOCK:
-        rec = _SWEEP.setdefault(key, {'old': set(), 'new': set()})
-        rec['old'].add(old_dir)
-        rec['new'].add(new_dir)
-        old_root, new_root = sweep.album_root(rec['old']), sweep.album_root(rec['new'])
-        moves = sweep.plan(old_root, new_root, rec['old'], rec['new'])
+        old_root, new_root = sweep.album_root(old_dirs), sweep.album_root(new_dirs)
+        moves = sweep.plan(old_root, new_root, old_dirs, new_dirs)
         if not moves:
             return
         moved, skipped = sweep.apply(moves, overwrite=bool(s['move_overwrite_existing_files']))
@@ -385,7 +410,6 @@ def _after_save(file, old_filename, new_filename) -> None:
                      new_root, f' ({len(skipped)} already there, left behind)' if skipped else '')
         if s['delete_empty_dirs'] and not skipped:
             _remove_empty_upwards(old_root)
-        _SWEEP.pop(key, None)
 
 
 def _remove_empty_upwards(folder: str) -> None:
@@ -409,7 +433,7 @@ def _remove_empty_upwards(folder: str) -> None:
 
 
 def _patch_sweep() -> None:
-    global _ORIG_SAVE_AND_RENAME
+    global _ORIG_SAVE_AND_RENAME, _ORIG_SAVE
     if _ORIG_SAVE_AND_RENAME is not None:
         return
     try:
@@ -417,11 +441,25 @@ def _patch_sweep() -> None:
     except ImportError:
         return
     original = File._save_and_rename
+    original_save = File.save
 
-    def _save_and_rename(self, old_filename, metadata):
-        new_filename = original(self, old_filename, metadata)
+    def save(self):
+        # (main thread) the album's folders as they are when its save starts
         try:
-            _after_save(self, old_filename, new_filename)
+            self._ds_album_dirs = _album_dirs(self) if _own('sweep_album_folder') else None
+        except Exception:
+            self._ds_album_dirs = None
+            log = _log()
+            if log:
+                log.error('Destination Switcher: the album\'s folders could not be worked out', exc_info=True)
+        return original_save(self)
+
+    def _save_and_rename(self, old_filename, metadata, *args, **kwargs):
+        # (*args: what newer Picard versions pass the save task)
+        dirs = getattr(self, '_ds_album_dirs', None)
+        new_filename = original(self, old_filename, metadata, *args, **kwargs)
+        try:
+            _after_save(self, old_filename, new_filename, dirs)
         except Exception:
             log = _log()
             if log:
@@ -430,19 +468,24 @@ def _patch_sweep() -> None:
         return new_filename
 
     File._save_and_rename = _save_and_rename
+    File.save = save
     _ORIG_SAVE_AND_RENAME = original
+    _ORIG_SAVE = original_save
 
 
 def _unpatch_sweep() -> None:
-    global _ORIG_SAVE_AND_RENAME
+    global _ORIG_SAVE_AND_RENAME, _ORIG_SAVE
     if _ORIG_SAVE_AND_RENAME is None:
         return
     try:
         from picard.file import File
         File._save_and_rename = _ORIG_SAVE_AND_RENAME
+        if _ORIG_SAVE is not None:
+            File.save = _ORIG_SAVE
     except ImportError:
         pass
-    _ORIG_SAVE_AND_RENAME = None
+    _ORIG_SAVE_AND_RENAME = _ORIG_SAVE = None
+    _ALBUM_DIRS.clear()
 
 
 def _unpatch_saving() -> None:
