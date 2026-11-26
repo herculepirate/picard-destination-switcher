@@ -33,7 +33,9 @@ profiles.
   folder that still holds music (an album saved in part, an artist's folder of
   several albums) is never touched; a file already at the destination is kept
   unless Picard's *Overwrite existing files* is on. Option: **"Move everything
-  left in an album's folder with it"** (on).
+  left in an album's folder with it"** (on). With a Picard that does this for
+  its *additional files* itself ([metabrainz/picard#3631](https://github.com/metabrainz/picard/pull/3631)),
+  the plugin takes Picard's album folders and moves what Picard's patterns leave.
 - **Save to** offers the folders you name in the plugin's settings — for
   example *Lossless* → `/music/lossless` and *Lossy* → `/music/lossy`.
   Choosing one sets Picard's destination directory (Options → File Naming →

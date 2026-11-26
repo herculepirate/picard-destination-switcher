@@ -387,20 +387,27 @@ def _album_dirs(file):
     return hit
 
 
-def _after_save(file, old_filename, new_filename, dirs) -> None:
+def _after_save(file, old_filename, new_filename, dirs, picard_folders=None) -> None:
     """A file was saved (on Picard's saving thread). When it moved and its album's old folder
     now holds no audio, what is left there goes to the album's new folder (sweep). DIRS: the
-    album's folders when the save started (_album_dirs)."""
-    if not new_filename or not old_filename or not dirs or not _own('sweep_album_folder'):
+    album's folders when the save started (_album_dirs). PICARD_FOLDERS: the (old, new) album
+    folder Picard itself worked out (File._album_folders, Picard with metabrainz/picard#3631):
+    Picard has moved its "additional files" from there; the rest goes the same way."""
+    if not new_filename or not old_filename or not _own('sweep_album_folder'):
+        return
+    if not dirs and not picard_folders:
         return
     old_dir, new_dir = os.path.dirname(old_filename), os.path.dirname(new_filename)
     if os.path.normpath(old_dir) == os.path.normpath(new_dir):
         return
     s = _setting()
     log = _log()
-    old_dirs, new_dirs = dirs
+    old_dirs, new_dirs = dirs or (set(), set())
     with _SWEEP_LOCK:
-        old_root, new_root = sweep.album_root(old_dirs), sweep.album_root(new_dirs)
+        if picard_folders:
+            old_root, new_root = picard_folders      # (one answer: Picard's)
+        else:
+            old_root, new_root = sweep.album_root(old_dirs), sweep.album_root(new_dirs)
         moves = sweep.plan(old_root, new_root, old_dirs, new_dirs)
         if not moves:
             return
@@ -444,9 +451,12 @@ def _patch_sweep() -> None:
     original_save = File.save
 
     def save(self):
-        # (main thread) the album's folders as they are when its save starts
+        # (main thread) the album's folders as they are when its save starts; not needed when
+        # Picard works them out itself (File._album_folders, metabrainz/picard#3631) and has an answer
         try:
-            self._ds_album_dirs = _album_dirs(self) if _own('sweep_album_folder') else None
+            native = getattr(self, '_album_folders', None)
+            self._ds_album_dirs = None if not _own('sweep_album_folder') or (native and native()) \
+                else _album_dirs(self)
         except Exception:
             self._ds_album_dirs = None
             log = _log()
@@ -457,9 +467,11 @@ def _patch_sweep() -> None:
     def _save_and_rename(self, old_filename, metadata, *args, **kwargs):
         # (*args: what newer Picard versions pass the save task)
         dirs = getattr(self, '_ds_album_dirs', None)
+        # Picard with metabrainz/picard#3631 passes the album folders it worked out itself
+        picard_folders = kwargs.get('album_folders', args[0] if args else None)
         new_filename = original(self, old_filename, metadata, *args, **kwargs)
         try:
-            _after_save(self, old_filename, new_filename, dirs)
+            _after_save(self, old_filename, new_filename, dirs, picard_folders)
         except Exception:
             log = _log()
             if log:
